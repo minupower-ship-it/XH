@@ -1,13 +1,15 @@
 import os
 import sqlite3
 import requests
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import stripe
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 
 # ================== 환경변수 ==================
 stripe.api_key        = os.getenv('STRIPE_SECRET_KEY')
@@ -15,7 +17,6 @@ WEBHOOK_SECRET        = os.getenv('STRIPE_WEBHOOK_SECRET')
 DISCORD_BOT_TOKEN     = os.getenv('DISCORD_BOT_TOKEN')
 INVITE_CHANNEL_ID     = os.getenv('DISCORD_INVITE_CHANNEL_ID')
 
-# Stripe Price ID (대시보드 → Products → Price ID 복사)
 LIFETIME_PRICE_ID     = os.getenv('STRIPE_LIFETIME_PRICE_ID')
 VIP_PRICE_ID          = os.getenv('STRIPE_VIP_PRICE_ID')
 
@@ -60,12 +61,9 @@ def create_discord_invite():
 @app.route('/create-checkout', methods=['POST'])
 def create_checkout():
     data = request.get_json()
-    plan = data.get('plan')  # 'lifetime' 또는 'vip'
+    plan = data.get('plan')
 
-    if plan == 'vip':
-        price_id = VIP_PRICE_ID
-    else:
-        price_id = LIFETIME_PRICE_ID
+    price_id = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
 
     try:
         session = stripe.checkout.Session.create(
