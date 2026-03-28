@@ -1,100 +1,135 @@
+import os
+import sqlite3
+import requests
 from flask import Flask, request, jsonify
 import stripe
-import discord
-import os
-import asyncio
-import threading
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
 
-# ================== 설정 ==================
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
-WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
-DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-B_SERVER_GUILD_ID = int(os.getenv('B_SERVER_GUILD_ID'))
+# ================== 환경변수 ==================
+stripe.api_key        = os.getenv('STRIPE_SECRET_KEY')
+WEBHOOK_SECRET        = os.getenv('STRIPE_WEBHOOK_SECRET')
+DISCORD_BOT_TOKEN     = os.getenv('DISCORD_BOT_TOKEN')
+INVITE_CHANNEL_ID     = os.getenv('DISCORD_INVITE_CHANNEL_ID')  # 초대링크 생성용 채널 ID
 
-# Discord Bot 클라이언트 (voice 기능 OFF)
-intents = discord.Intents.default()
-intents.message_content = True
-# voice 관련 intent는 사용하지 않음
-client = discord.Client(intents=intents)
+DISCORD_API = "https://discord.com/api/v10"
 
-# ================== Discord Bot ==================
-@client.event
-async def on_ready():
-    print(f"✅ Discord Bot 로그인 완료 → {client.user}")
+# ================== DB 초기화 ==================
+def init_db():
+    conn = sqlite3.connect('payments.db')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            session_id  TEXT PRIMARY KEY,
+            invite_url  TEXT,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ================== Discord 헬퍼 ==================
+def discord_headers():
+    return {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+def create_discord_invite():
+    """B 서버 채널에서 1회용 영구 초대링크 생성"""
+    url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
+    res = requests.post(url, headers=discord_headers(), json={
+        "max_uses": 1,
+        "max_age": 0,      # 0 = 만료 없음
+        "unique": True
+    })
+    res.raise_for_status()
+    return f"https://discord.gg/{res.json()['code']}"
 
 # ================== Stripe Webhook ==================
 @app.route('/webhook', methods=['POST'])
-async def stripe_webhook():
-    payload = request.get_data(as_text=True)
+def stripe_webhook():
+    payload    = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, WEBHOOK_SECRET
-        )
+        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
     except Exception as e:
-        print(f"Webhook Error: {e}")
+        print(f"[Webhook] 서명 검증 실패: {e}")
         return jsonify(success=False), 400
 
     if event['type'] == 'checkout.session.completed':
-        print("💰 결제 성공 이벤트 수신됨")
+        session_id = event['data']['object']['id']
+
+        conn = sqlite3.connect('payments.db')
+        c = conn.cursor()
+        c.execute("SELECT session_id FROM payments WHERE session_id = ?", (session_id,))
+        if not c.fetchone():
+            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
+            conn.commit()
+            print(f"[Webhook] 결제 저장 완료: {session_id}")
+        conn.close()
 
     return jsonify(success=True), 200
 
-
-# ================== Success Page에서 호출할 엔드포인트 ==================
+# ================== 초대링크 발급 ==================
 @app.route('/create-invite', methods=['POST'])
-async def create_invite():
-    data = request.get_json()
+def create_invite():
+    data       = request.get_json()
     session_id = data.get('session_id')
 
     if not session_id:
-        return jsonify({"error": "No session_id provided"}), 400
+        return jsonify({"error": "session_id가 없습니다."}), 400
 
+    conn = sqlite3.connect('payments.db')
+    c    = conn.cursor()
+    c.execute("SELECT invite_url FROM payments WHERE session_id = ?", (session_id,))
+    row = c.fetchone()
+
+    # DB에 없으면 Stripe에서 직접 검증 (Webhook 누락 대비)
+    if not row:
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+            if session.payment_status != 'paid':
+                conn.close()
+                return jsonify({"error": "결제가 완료되지 않았습니다."}), 400
+            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
+            conn.commit()
+            row = (None,)
+        except stripe.error.StripeError as e:
+            conn.close()
+            return jsonify({"error": f"결제 검증 실패: {str(e)}"}), 400
+
+    existing_invite = row[0]
+
+    # 이미 발급된 링크가 있으면 재사용
+    if existing_invite:
+        conn.close()
+        return jsonify({"success": True, "invite_url": existing_invite})
+
+    # 새 초대링크 생성
     try:
-        # Stripe에서 session 검증
-        session = stripe.checkout.Session.retrieve(session_id)
-
-        if session.payment_status != 'paid':
-            return jsonify({"error": "Payment not completed"}), 400
-
-        # B서버에서 1인용 초대링크 생성
-        guild = client.get_guild(B_SERVER_GUILD_ID)
-        if not guild:
-            return jsonify({"error": "B server not found"}), 404
-
-        channel = guild.text_channels[0]   # 필요시 특정 채널 ID로 변경
-
-        invite = await channel.create_invite(
-            max_uses=1,
-            unique=True,
-            reason="Lifetime Payment"
-        )
-
-        return jsonify({
-            "success": True,
-            "invite_url": invite.url
-        })
-
-    except stripe.error.StripeError as e:
-        print(f"Stripe Error: {e}")
-        return jsonify({"error": "Invalid or expired session"}), 400
+        invite_url = create_discord_invite()
+        c.execute("UPDATE payments SET invite_url = ? WHERE session_id = ?", (invite_url, session_id))
+        conn.commit()
+        conn.close()
+        print(f"[Invite] 발급 완료: {invite_url}")
+        return jsonify({"success": True, "invite_url": invite_url})
     except Exception as e:
-        print(f"Invite creation error: {e}")
-        return jsonify({"error": "Failed to create invite link"}), 500
+        conn.close()
+        print(f"[Invite] 생성 실패: {e}")
+        return jsonify({"error": "초대링크 생성에 실패했습니다. 잠시 후 다시 시도해주세요."}), 500
 
+# ================== 헬스체크 ==================
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
 
-# ================== Flask + Bot 실행 ==================
+# ================== 실행 ==================
 if __name__ == '__main__':
-    def run_bot():
-        asyncio.run(client.start(DISCORD_BOT_TOKEN))
-
-    threading.Thread(target=run_bot, daemon=True).start()
-
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
