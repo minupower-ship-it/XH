@@ -48,26 +48,12 @@ def discord_headers():
     }
 
 def create_discord_invite():
-    # 1. 봇 토큰 확인
-    print(f"[Discord] Bot Token 앞 10자리: {DISCORD_BOT_TOKEN[:10] if DISCORD_BOT_TOKEN else 'None'}")
-    print(f"[Discord] Channel ID: {INVITE_CHANNEL_ID}")
-
-    # 2. 봇 자신 정보 확인
-    me = requests.get(f"{DISCORD_API}/users/@me", headers=discord_headers())
-    print(f"[Discord] Bot 정보 조회: {me.status_code} - {me.json()}")
-
-    # 3. 채널 정보 확인
-    ch = requests.get(f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}", headers=discord_headers())
-    print(f"[Discord] 채널 정보 조회: {ch.status_code} - {ch.json()}")
-
-    # 4. 초대링크 생성
     url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
     res = requests.post(url, headers=discord_headers(), json={
         "max_uses": 1,
         "max_age": 0,
         "unique": True
     })
-    print(f"[Discord] 초대링크 생성: {res.status_code} - {res.json()}")
     res.raise_for_status()
     return f"https://discord.gg/{res.json()['code']}"
 
@@ -173,16 +159,5 @@ def health():
 
 # ================== 실행 ==================
 if __name__ == '__main__':
-    import threading
-    import asyncio
-    from bot import client as bot_client
-
-    DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-
-    def run_bot():
-        asyncio.run(bot_client.start(DISCORD_TOKEN))
-
-    threading.Thread(target=run_bot, daemon=True).start()
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
