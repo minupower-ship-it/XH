@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 import stripe
 from dotenv import load_dotenv
 
@@ -13,7 +13,14 @@ app = Flask(__name__)
 stripe.api_key        = os.getenv('STRIPE_SECRET_KEY')
 WEBHOOK_SECRET        = os.getenv('STRIPE_WEBHOOK_SECRET')
 DISCORD_BOT_TOKEN     = os.getenv('DISCORD_BOT_TOKEN')
-INVITE_CHANNEL_ID     = os.getenv('DISCORD_INVITE_CHANNEL_ID')  # 초대링크 생성용 채널 ID
+INVITE_CHANNEL_ID     = os.getenv('DISCORD_INVITE_CHANNEL_ID')
+
+# Stripe Price ID (대시보드 → Products → Price ID 복사)
+LIFETIME_PRICE_ID     = os.getenv('STRIPE_LIFETIME_PRICE_ID')
+VIP_PRICE_ID          = os.getenv('STRIPE_VIP_PRICE_ID')
+
+SUCCESS_URL           = "https://xhouse.vip/success.html?session_id={CHECKOUT_SESSION_ID}"
+CANCEL_URL            = "https://xhouse.vip"
 
 DISCORD_API = "https://discord.com/api/v10"
 
@@ -40,15 +47,41 @@ def discord_headers():
     }
 
 def create_discord_invite():
-    """B 서버 채널에서 1회용 영구 초대링크 생성"""
     url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
     res = requests.post(url, headers=discord_headers(), json={
         "max_uses": 1,
-        "max_age": 0,      # 0 = 만료 없음
+        "max_age": 0,
         "unique": True
     })
     res.raise_for_status()
     return f"https://discord.gg/{res.json()['code']}"
+
+# ================== Stripe Checkout Session 생성 ==================
+@app.route('/create-checkout', methods=['POST'])
+def create_checkout():
+    data = request.get_json()
+    plan = data.get('plan')  # 'lifetime' 또는 'vip'
+
+    if plan == 'vip':
+        price_id = VIP_PRICE_ID
+    else:
+        price_id = LIFETIME_PRICE_ID
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price': price_id,
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=SUCCESS_URL,
+            cancel_url=CANCEL_URL,
+        )
+        return jsonify({"url": session.url})
+    except Exception as e:
+        print(f"[Checkout] 생성 실패: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ================== Stripe Webhook ==================
 @app.route('/webhook', methods=['POST'])
