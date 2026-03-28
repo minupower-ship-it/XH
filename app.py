@@ -1,163 +1,195 @@
-import os
-import sqlite3
-import requests
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import stripe
+import discord
+from discord import app_commands
+from datetime import datetime
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app)
+TOKEN = os.getenv('DISCORD_TOKEN')
 
-# ================== 환경변수 ==================
-stripe.api_key        = os.getenv('STRIPE_SECRET_KEY')
-WEBHOOK_SECRET        = os.getenv('STRIPE_WEBHOOK_SECRET')
-DISCORD_BOT_TOKEN     = os.getenv('DISCORD_BOT_TOKEN')
-INVITE_CHANNEL_ID     = os.getenv('DISCORD_INVITE_CHANNEL_ID')
+intents = discord.Intents.default()
+intents.message_content = True
 
-LIFETIME_PRICE_ID     = os.getenv('STRIPE_LIFETIME_PRICE_ID')
-VIP_PRICE_ID          = os.getenv('STRIPE_VIP_PRICE_ID')
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
-SUCCESS_URL           = "https://xhouse.vip/success.html?session_id={CHECKOUT_SESSION_ID}"
-CANCEL_URL            = "https://xhouse.vip"
+# ================== 채널 ID ==================
+CHANNELS = {
+    "🇦🇸🇮🇦🇳":     1487319260228358174,
+    "🇭🇮🇸🇵🇦🇳🇮🇨": 1487319298681864342,
+    "🇧‌🇱‌🇦‌🇨‌🇰‌":  1487319326204625047,
+    "🇧🇱🇦🇨🇰":     1487319363265626173,
+}
 
-DISCORD_API = "https://discord.com/api/v10"
+# ================== Content Request ==================
+class ContentRequestModal(discord.ui.Modal, title="Content Request Form"):
+    name = discord.ui.TextInput(label="Name", placeholder="요청자 이름", required=True, max_length=100)
+    link = discord.ui.TextInput(label="Link (OF / X 등)", placeholder="https://...", required=True)
+    comment = discord.ui.TextInput(label="Comment", placeholder="추가 설명", required=False, style=discord.TextStyle.paragraph)
 
-# ================== DB 초기화 ==================
-def init_db():
-    conn = sqlite3.connect('payments.db')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS payments (
-            session_id  TEXT PRIMARY KEY,
-            invite_url  TEXT,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    async def on_submit(self, interaction: discord.Interaction):
+        request_channel = discord.utils.get(interaction.guild.text_channels, name="🇷🇪🇶🇺🇪🇸🇹")
+
+        if request_channel:
+            embed = discord.Embed(
+                title="🆕 New Content Request",
+                description="A new content request has been submitted!",
+                color=0x9b59b6,
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Requested By", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Name", value=self.name.value, inline=True)
+            embed.add_field(name="Content Link", value=self.link.value, inline=False)
+
+            if self.comment.value and self.comment.value.strip():
+                embed.add_field(name="Comment", value=self.comment.value, inline=False)
+
+            embed.set_footer(text=f"Requested at • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+            await request_channel.send(embed=embed)
+            await interaction.response.send_message("✅ 요청이 성공적으로 접수되었습니다!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ request 채널을 찾을 수 없습니다. 관리자에게 문의해주세요.", ephemeral=True)
+
+
+class RequestButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Submit Content Request", style=discord.ButtonStyle.primary, emoji="📩", custom_id="submit_request")
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ContentRequestModal())
+
+
+@tree.command(name="setup-request", description="request-form 채널에 버튼 설정")
+async def setup_request(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="#request-form에 오신 걸 환영합니다!",
+        description="#request-form 채널의 시작이에요.",
+        color=0x2b2d31
+    )
+    embed.add_field(
+        name="Request Any Model You Want",
+        value="Want access to exclusive content?\n\nGet premium access at **xhouse.vip** and unlock:\n• Unlimited model requests\n• Exclusive content library\n• Priority updates",
+        inline=False
+    )
+
+    view = RequestButtonView()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ================== Post System ==================
+class PostModal(discord.ui.Modal, title="New Content Post"):
+    post_name = discord.ui.TextInput(label="Name", placeholder="예: Poppi Louiz", required=True, max_length=100)
+    file_size = discord.ui.TextInput(label="File Size", placeholder="예: 10GB", required=True, max_length=20)
+    key = discord.ui.TextInput(label="Decryption Key", placeholder="복호화 키 입력", required=True, max_length=200)
+    link = discord.ui.TextInput(label="VIP Link", placeholder="https://mega.nz/...", required=True)
+    image_url = discord.ui.TextInput(label="Image URL", placeholder="https://... (이미지 URL)", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = ChannelSelectView(
+            post_name=self.post_name.value,
+            file_size=self.file_size.value,
+            key=self.key.value,
+            link=self.link.value,
+            image_url=self.image_url.value
         )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ================== Discord 헬퍼 ==================
-def discord_headers():
-    return {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-def create_discord_invite():
-    url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
-    res = requests.post(url, headers=discord_headers(), json={
-        "max_uses": 1,
-        "max_age": 0,
-        "unique": True
-    })
-    res.raise_for_status()
-    return f"https://discord.gg/{res.json()['code']}"
-
-# ================== Stripe Checkout Session 생성 ==================
-@app.route('/create-checkout', methods=['POST'])
-def create_checkout():
-    data = request.get_json()
-    plan = data.get('plan')
-
-    price_id = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
-
-    try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{
-                'price': price_id,
-                'quantity': 1,
-            }],
-            mode='payment',
-            success_url=SUCCESS_URL,
-            cancel_url=CANCEL_URL,
+        await interaction.response.send_message(
+            "📢 포스팅할 채널을 선택해주세요:",
+            view=view,
+            ephemeral=True
         )
-        return jsonify({"url": session.url})
-    except Exception as e:
-        print(f"[Checkout] 생성 실패: {e}")
-        return jsonify({"error": str(e)}), 500
 
-# ================== Stripe Webhook ==================
-@app.route('/webhook', methods=['POST'])
-def stripe_webhook():
-    payload    = request.get_data(as_text=True)
-    sig_header = request.headers.get('Stripe-Signature')
 
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
-    except Exception as e:
-        print(f"[Webhook] 서명 검증 실패: {e}")
-        return jsonify(success=False), 400
+class ChannelSelectView(discord.ui.View):
+    def __init__(self, post_name, file_size, key, link, image_url):
+        super().__init__(timeout=180)
+        self.add_item(ChannelSelect(post_name, file_size, key, link, image_url))
 
-    if event['type'] == 'checkout.session.completed':
-        session_id = event['data']['object']['id']
 
-        conn = sqlite3.connect('payments.db')
-        c = conn.cursor()
-        c.execute("SELECT session_id FROM payments WHERE session_id = ?", (session_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
-            conn.commit()
-            print(f"[Webhook] 결제 저장 완료: {session_id}")
-        conn.close()
+class ChannelSelect(discord.ui.Select):
+    def __init__(self, post_name, file_size, key, link, image_url):
+        self.post_name = post_name
+        self.file_size = file_size
+        self.key = key
+        self.link = link
+        self.image_url = image_url
 
-    return jsonify(success=True), 200
+        options = [discord.SelectOption(label=name, value=str(ch_id)) for name, ch_id in CHANNELS.items()]
+        super().__init__(placeholder="채널 선택...", options=options)
 
-# ================== 초대링크 발급 ==================
-@app.route('/create-invite', methods=['POST'])
-def create_invite():
-    data       = request.get_json()
-    session_id = data.get('session_id')
+    async def callback(self, interaction: discord.Interaction):
+        channel_id = int(self.values[0])
+        channel = client.get_channel(channel_id)
 
-    if not session_id:
-        return jsonify({"error": "session_id가 없습니다."}), 400
+        if not channel:
+            await interaction.response.send_message("❌ 채널을 찾을 수 없습니다.", ephemeral=True)
+            return
 
-    conn = sqlite3.connect('payments.db')
-    c    = conn.cursor()
-    c.execute("SELECT invite_url FROM payments WHERE session_id = ?", (session_id,))
-    row = c.fetchone()
+        embed = discord.Embed(color=0x2b2d31)
+        embed.set_image(url=self.image_url)
+        embed.add_field(
+            name=f"{self.post_name} — {self.file_size}",
+            value=f"——————————————————\n🔒 *VIP link hidden*\n\n**Decryption Key:** `{self.key}`\n——————————————————",
+            inline=False
+        )
 
-    if not row:
-        try:
-            session = stripe.checkout.Session.retrieve(session_id)
-            if session.payment_status != 'paid':
-                conn.close()
-                return jsonify({"error": "결제가 완료되지 않았습니다."}), 400
-            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
-            conn.commit()
-            row = (None,)
-        except stripe.error.StripeError as e:
-            conn.close()
-            return jsonify({"error": f"결제 검증 실패: {str(e)}"}), 400
+        view = RevealLinkView(link=self.link)
+        await channel.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ 포스팅 완료!", ephemeral=True)
 
-    existing_invite = row[0]
 
-    if existing_invite:
-        conn.close()
-        return jsonify({"success": True, "invite_url": existing_invite})
+class RevealLinkView(discord.ui.View):
+    def __init__(self, link: str):
+        super().__init__(timeout=None)
+        self.link = link
 
-    try:
-        invite_url = create_discord_invite()
-        c.execute("UPDATE payments SET invite_url = ? WHERE session_id = ?", (invite_url, session_id))
-        conn.commit()
-        conn.close()
-        print(f"[Invite] 발급 완료: {invite_url}")
-        return jsonify({"success": True, "invite_url": invite_url})
-    except Exception as e:
-        conn.close()
-        print(f"[Invite] 생성 실패: {e}")
-        return jsonify({"error": "초대링크 생성에 실패했습니다. 잠시 후 다시 시도해주세요."}), 500
+    @discord.ui.button(label="Reveal Link", style=discord.ButtonStyle.primary, emoji="🔓", custom_id="reveal_link")
+    async def reveal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"🔗 **Your VIP link:**\n{self.link}",
+            ephemeral=True
+        )
 
-# ================== 헬스체크 ==================
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"}), 200
 
-# ================== 실행 ==================
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+class PostButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="New Post", style=discord.ButtonStyle.success, emoji="📤", custom_id="new_post")
+    async def new_post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+            return
+        await interaction.response.send_modal(PostModal())
+
+
+@tree.command(name="setup-post", description="관리자용 포스팅 버튼 설정")
+async def setup_post(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 관리자 권한이 필요합니다.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="📤 Content Post Panel",
+        description="새 콘텐츠를 포스팅하려면 아래 버튼을 클릭하세요.",
+        color=0x2b2d31
+    )
+    view = PostButtonView()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ================== 봇 시작 ==================
+@client.event
+async def on_ready():
+    await tree.sync()
+    client.add_view(RequestButtonView())
+    client.add_view(PostButtonView())
+    print(f"✅ Bot 온라인! ({client.user})")
+
+client.run(TOKEN)
