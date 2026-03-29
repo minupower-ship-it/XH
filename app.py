@@ -17,6 +17,8 @@ WEBHOOK_SECRET            = os.getenv('STRIPE_WEBHOOK_SECRET')
 
 # 서버 1 (xhouse.vip)
 DISCORD_BOT_TOKEN         = os.getenv('DISCORD_BOT_TOKEN')
+XHOUSE_ROLE_ID            = os.getenv('XHOUSE_ROLE_ID')
+XHOUSE_GUILD_ID           = os.getenv('XHOUSE_GUILD_ID')
 INVITE_CHANNEL_ID         = os.getenv('DISCORD_INVITE_CHANNEL_ID')
 LIFETIME_PRICE_ID         = os.getenv('STRIPE_LIFETIME_PRICE_ID')
 VIP_PRICE_ID              = os.getenv('STRIPE_VIP_PRICE_ID')
@@ -104,6 +106,8 @@ def create_checkout():
     plan = data.get('plan')
     price_id = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
 
+    discord_id = data.get('discord_id')
+
     try:
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
@@ -111,6 +115,7 @@ def create_checkout():
             mode='payment',
             success_url=SUCCESS_URL_S1,
             cancel_url=CANCEL_URL_S1,
+            metadata={"discord_id": discord_id} if discord_id else {}
         )
         return jsonify({"url": session.url})
     except Exception as e:
@@ -131,6 +136,9 @@ def stripe_webhook():
 
     if event['type'] == 'checkout.session.completed':
         session_id = event['data']['object']['id']
+        session_obj = event['data']['object']
+        discord_id  = session_obj.get('metadata', {}).get('discord_id')
+
         conn = sqlite3.connect('payments.db')
         c = conn.cursor()
         c.execute("SELECT session_id FROM payments WHERE session_id = ?", (session_id,))
@@ -138,6 +146,16 @@ def stripe_webhook():
             c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
             conn.commit()
             print(f"[S1 Webhook] 결제 저장: {session_id}")
+
+            # 역할 부여
+            if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
+                url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
+                res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
+                if res.status_code in (200, 204):
+                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. Welcome to X-House! 🎉")
+                    print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
+                else:
+                    print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
         conn.close()
 
     return jsonify(success=True), 200
