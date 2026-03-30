@@ -296,3 +296,76 @@ def health():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
+
+# ================== Mega 자동 스캔 ==================
+@app.route('/mega/scan', methods=['POST'])
+def mega_scan():
+    from mega import Mega
+    import math
+
+    mega_email    = os.getenv('MEGA_EMAIL')
+    mega_password = os.getenv('MEGA_PASSWORD')
+
+    if not mega_email or not mega_password:
+        return jsonify({"error": "Mega credentials not set"}), 500
+
+    data         = request.get_json()
+    folder_names = data.get('folders', [])  # 스캔할 폴더 이름 목록
+
+    if not folder_names:
+        return jsonify({"error": "No folders provided"}), 400
+
+    try:
+        m    = Mega()
+        mega = m.login(mega_email, mega_password)
+        files = mega.get_files()
+    except Exception as e:
+        print(f"[Mega] 로그인 실패: {e}")
+        return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
+
+    results = []
+
+    for folder_name in folder_names:
+        try:
+            # 폴더 찾기
+            folder = mega.find(folder_name)
+            if not folder:
+                results.append({"name": folder_name, "success": False, "reason": "Folder not found in Mega"})
+                continue
+
+            folder_node = list(folder.values())[0] if isinstance(folder, dict) else folder
+
+            # 폴더 링크 생성
+            link = mega.get_link(folder_node)
+            if not link:
+                results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
+                continue
+
+            # 링크에서 Key 추출 (#뒤)
+            key = link.split('#')[-1] if '#' in link else ""
+
+            # 폴더 용량 계산
+            total_bytes = 0
+            for f in files.values():
+                if f.get('t') == 0 and f.get('p') == folder_node.get('h'):
+                    total_bytes += f.get('s', 0)
+
+            if total_bytes > 0:
+                size_gb = round(total_bytes / (1024 ** 3), 2)
+                file_size = f"{size_gb}GB"
+            else:
+                file_size = "Unknown"
+
+            results.append({
+                "name":      folder_name,
+                "success":   True,
+                "link":      link,
+                "key":       key,
+                "file_size": file_size,
+            })
+
+        except Exception as e:
+            results.append({"name": folder_name, "success": False, "reason": str(e)})
+
+    return jsonify({"results": results})
