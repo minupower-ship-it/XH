@@ -19,6 +19,8 @@ WEBHOOK_SECRET            = os.getenv('STRIPE_WEBHOOK_SECRET')
 DISCORD_BOT_TOKEN         = os.getenv('DISCORD_BOT_TOKEN')
 XHOUSE_ROLE_ID            = os.getenv('XHOUSE_ROLE_ID')
 XHOUSE_GUILD_ID           = os.getenv('XHOUSE_GUILD_ID')
+XHOUSE_TX_CHANNEL_ID      = int(os.getenv('XHOUSE_TX_CHANNEL_ID', '1486794773263024309'))
+PBANK_TX_CHANNEL_ID       = int(os.getenv('PBANK_TX_CHANNEL_ID', '1488024169537867806'))
 INVITE_CHANNEL_ID         = os.getenv('DISCORD_INVITE_CHANNEL_ID')
 LIFETIME_PRICE_ID         = os.getenv('STRIPE_LIFETIME_PRICE_ID')
 VIP_PRICE_ID              = os.getenv('STRIPE_VIP_PRICE_ID')
@@ -65,6 +67,16 @@ def discord_headers(token):
         "Authorization": f"Bot {token}",
         "Content-Type": "application/json"
     }
+
+async def log_transaction(token: str, channel_id: int, message: str):
+    """결제 기록을 Discord 채널에 저장"""
+    import asyncio
+    url = f"{DISCORD_API}/channels/{channel_id}/messages"
+    res = requests.post(url, headers=discord_headers(token), json={"content": message})
+    if res.status_code == 200:
+        print(f"[TX Log] 기록 완료: {message}")
+    else:
+        print(f"[TX Log] 기록 실패: {res.status_code}")
 
 def create_discord_invite():
     url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
@@ -154,6 +166,10 @@ def stripe_webhook():
                 if res.status_code in (200, 204):
                     send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. Welcome to X-House! 🎉")
                     print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
+                    # 결제 기록 Discord 채널에 저장
+                    from datetime import datetime
+                    log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+                    log_transaction(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
                 else:
                     print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
         conn.close()
@@ -259,8 +275,12 @@ def s2_stripe_webhook():
             if success:
                 c.execute("UPDATE s2_payments SET role_granted = 1 WHERE session_id = ?", (session_id,))
                 conn.commit()
-                send_dm(S2_BOT_TOKEN, discord_id, "✅ 결제가 완료되었습니다! 멤버십이 활성화되었어요. 🎉")
+                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. 🎉")
                 print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
+                # 결제 기록 Discord 채널에 저장
+                from datetime import datetime
+                log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+                log_transaction(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
             else:
                 print(f"[S2 Webhook] 역할 부여 실패: {discord_id}")
         conn.close()
