@@ -1,6 +1,9 @@
 import os
 import sqlite3
 import requests
+import random
+import string
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import stripe
@@ -20,21 +23,24 @@ DISCORD_BOT_TOKEN         = os.getenv('DISCORD_BOT_TOKEN')
 XHOUSE_ROLE_ID            = os.getenv('XHOUSE_ROLE_ID')
 XHOUSE_GUILD_ID           = os.getenv('XHOUSE_GUILD_ID')
 XHOUSE_TX_CHANNEL_ID      = int(os.getenv('XHOUSE_TX_CHANNEL_ID', '1486794773263024309'))
-PBANK_TX_CHANNEL_ID       = int(os.getenv('PBANK_TX_CHANNEL_ID', '1488024169537867806'))
 INVITE_CHANNEL_ID         = os.getenv('DISCORD_INVITE_CHANNEL_ID')
 LIFETIME_PRICE_ID         = os.getenv('STRIPE_LIFETIME_PRICE_ID')
 VIP_PRICE_ID              = os.getenv('STRIPE_VIP_PRICE_ID')
 SUCCESS_URL_S1            = "https://xhouse.vip/success.html?session_id={CHECKOUT_SESSION_ID}"
 CANCEL_URL_S1             = "https://xhouse.vip"
 
-# 서버 2
+# 서버 2 (PBank)
 S2_BOT_TOKEN              = os.getenv('S2_DISCORD_BOT_TOKEN')
 S2_GUILD_ID               = os.getenv('S2_GUILD_ID')
 S2_ROLE_ID                = os.getenv('S2_ROLE_ID')
 S2_WEBHOOK_SECRET         = os.getenv('S2_STRIPE_WEBHOOK_SECRET')
 S2_PRICE_ID               = os.getenv('S2_STRIPE_PRICE_ID')
-SUCCESS_URL_S2            = "https://xhouse.vip/success2.html?session_id={CHECKOUT_SESSION_ID}"
+PBANK_TX_CHANNEL_ID       = int(os.getenv('PBANK_TX_CHANNEL_ID', '1488024169537867806'))
+SUCCESS_URL_S2            = "https://xhouse.vip/success.html?session_id={CHECKOUT_SESSION_ID}"
 CANCEL_URL_S2             = "https://xhouse.vip"
+
+# Dummy 채널 (링크 저장 + 코드 저장)
+CODE_STORE_CHANNEL        = 1488022953525248141
 
 DISCORD_API = "https://discord.com/api/v10"
 
@@ -68,15 +74,14 @@ def discord_headers(token):
         "Content-Type": "application/json"
     }
 
-async def log_transaction(token: str, channel_id: int, message: str):
-    """결제 기록을 Discord 채널에 저장"""
-    import asyncio
+def log_transaction(token: str, channel_id: int, message: str):
+    """결제 기록을 Discord 채널에 저장 (동기 방식)"""
     url = f"{DISCORD_API}/channels/{channel_id}/messages"
     res = requests.post(url, headers=discord_headers(token), json={"content": message})
     if res.status_code == 200:
-        print(f"[TX Log] 기록 완료: {message}")
+        print(f"[TX Log] 저장 완료: {message}")
     else:
-        print(f"[TX Log] 기록 실패: {res.status_code}")
+        print(f"[TX Log] 저장 실패: {res.status_code}")
 
 def create_discord_invite():
     url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
@@ -111,14 +116,33 @@ def send_dm(token: str, discord_id: str, message: str):
     )
     return res2.status_code == 200
 
+def get_messages_from_channel(token, channel_id, limit=500):
+    """최신 메시지부터 역순으로 조회 (버그 수정 3번)"""
+    url = f"{DISCORD_API}/channels/{channel_id}/messages?limit=100"
+    headers = discord_headers(token)
+    messages = []
+    last_id = None
+    while len(messages) < limit:
+        url_paged = url + (f"&before={last_id}" if last_id else "")
+        res = requests.get(url_paged, headers=headers)
+        if res.status_code != 200:
+            break
+        batch = res.json()
+        if not batch:
+            break
+        messages.extend(batch)
+        last_id = batch[-1]['id']
+        if len(batch) < 100:
+            break
+    return messages  # Discord는 기본적으로 최신순 반환
+
 # ================== 서버 1: Checkout Session 생성 ==================
 @app.route('/create-checkout', methods=['POST'])
 def create_checkout():
-    data = request.get_json()
-    plan = data.get('plan')
-    price_id = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
-
+    data       = request.get_json()
+    plan       = data.get('plan')
     discord_id = data.get('discord_id')
+    price_id   = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
 
     try:
         session = stripe.checkout.Session.create(
@@ -147,27 +171,24 @@ def stripe_webhook():
         return jsonify(success=False), 400
 
     if event['type'] == 'checkout.session.completed':
-        session_id = event['data']['object']['id']
         session_obj = event['data']['object']
+        session_id  = session_obj['id']
         discord_id  = session_obj.get('metadata', {}).get('discord_id')
 
         conn = sqlite3.connect('payments.db')
-        c = conn.cursor()
+        c    = conn.cursor()
         c.execute("SELECT session_id FROM payments WHERE session_id = ?", (session_id,))
         if not c.fetchone():
             c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
             conn.commit()
             print(f"[S1 Webhook] 결제 저장: {session_id}")
 
-            # 역할 부여
             if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
                 url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
                 res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
                 if res.status_code in (200, 204):
                     send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. Welcome to X-House! 🎉")
                     print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
-                    # 결제 기록 Discord 채널에 저장
-                    from datetime import datetime
                     log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                     log_transaction(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
                 else:
@@ -183,7 +204,7 @@ def create_invite():
     session_id = data.get('session_id')
 
     if not session_id:
-        return jsonify({"error": "session_id가 없습니다."}), 400
+        return jsonify({"error": "session_id is required."}), 400
 
     conn = sqlite3.connect('payments.db')
     c    = conn.cursor()
@@ -195,13 +216,13 @@ def create_invite():
             session = stripe.checkout.Session.retrieve(session_id)
             if session.payment_status != 'paid':
                 conn.close()
-                return jsonify({"error": "결제가 완료되지 않았습니다."}), 400
+                return jsonify({"error": "Payment not completed."}), 400
             c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
             conn.commit()
             row = (None,)
         except stripe.error.StripeError as e:
             conn.close()
-            return jsonify({"error": f"결제 검증 실패: {str(e)}"}), 400
+            return jsonify({"error": f"Payment verification failed: {str(e)}"}), 400
 
     existing_invite = row[0]
     if existing_invite:
@@ -217,7 +238,7 @@ def create_invite():
     except Exception as e:
         conn.close()
         print(f"[S1 Invite] 생성 실패: {e}")
-        return jsonify({"error": "초대링크 생성에 실패했습니다."}), 500
+        return jsonify({"error": "Failed to create invite link. Please try again."}), 500
 
 # ================== 서버 2: Checkout Session 생성 ==================
 @app.route('/s2/create-checkout', methods=['POST'])
@@ -226,7 +247,7 @@ def s2_create_checkout():
     discord_id = data.get('discord_id')
 
     if not discord_id:
-        return jsonify({"error": "discord_id가 없습니다."}), 400
+        return jsonify({"error": "discord_id is required."}), 400
 
     try:
         session = stripe.checkout.Session.create(
@@ -270,15 +291,12 @@ def s2_stripe_webhook():
             c.execute("INSERT INTO s2_payments (session_id, discord_id) VALUES (?, ?)", (session_id, discord_id))
             conn.commit()
 
-            # 역할 부여
             success = assign_role(discord_id)
             if success:
                 c.execute("UPDATE s2_payments SET role_granted = 1 WHERE session_id = ?", (session_id,))
                 conn.commit()
                 send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. 🎉")
                 print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
-                # 결제 기록 Discord 채널에 저장
-                from datetime import datetime
                 log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                 log_transaction(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
             else:
@@ -287,22 +305,133 @@ def s2_stripe_webhook():
 
     return jsonify(success=True), 200
 
-# ================== 헬스체크 ==================
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"}), 200
+# ================== 코드 발급/검증 (텔레그램 봇용 - 보류) ==================
+def generate_code():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
-# ================== 실행 ==================
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+@app.route('/issue-code', methods=['POST'])
+def issue_code():
+    data       = request.get_json()
+    discord_id = data.get('discord_id')
+    if not discord_id:
+        return jsonify({"error": "discord_id required"}), 400
 
+    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
+
+    for msg in messages:
+        content = msg.get('content', '')
+        if content.startswith(f"CODE | {discord_id} |"):
+            parts = content.split(' | ')
+            if len(parts) >= 4:
+                existing_code = parts[2]
+                used          = parts[3].strip()
+                if used == 'used':
+                    return jsonify({"error": "Your code has already been used."}), 400
+                return jsonify({"success": True, "code": existing_code, "existing": True})
+
+    new_code = generate_code()
+    url      = f"{DISCORD_API}/channels/{CODE_STORE_CHANNEL}/messages"
+    res      = requests.post(url, headers=discord_headers(DISCORD_BOT_TOKEN), json={
+        "content": f"CODE | {discord_id} | {new_code} | unused"
+    })
+    if res.status_code != 200:
+        return jsonify({"error": "Failed to store code"}), 500
+
+    return jsonify({"success": True, "code": new_code, "existing": False})
+
+@app.route('/verify-code', methods=['POST'])
+def verify_code():
+    data = request.get_json()
+    code = data.get('code', '').strip()
+    if not code:
+        return jsonify({"error": "code required"}), 400
+
+    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
+
+    for msg in messages:
+        content = msg.get('content', '')
+        if not content.startswith("CODE |"):
+            continue
+        parts = content.split(' | ')
+        if len(parts) < 4:
+            continue
+        discord_id  = parts[1].strip()
+        stored_code = parts[2].strip()
+        used        = parts[3].strip()
+
+        if stored_code == code:
+            if used == 'used':
+                return jsonify({"error": "This code has already been used."}), 400
+            msg_id  = msg['id']
+            new_msg = f"CODE | {discord_id} | {stored_code} | used"
+            requests.patch(
+                f"{DISCORD_API}/channels/{CODE_STORE_CHANNEL}/messages/{msg_id}",
+                headers=discord_headers(DISCORD_BOT_TOKEN),
+                json={"content": new_msg}
+            )
+            return jsonify({"success": True, "discord_id": discord_id})
+
+    return jsonify({"error": "Invalid code."}), 404
+
+# ================== 포스트 조회 (텔레그램 봇용 - 보류) ==================
+@app.route('/get-posts', methods=['POST'])
+def get_posts():
+    data     = request.get_json()
+    category = data.get('category', '').lower()
+
+    CATEGORY_CHANNELS = {
+        "asian":    1487319260228358174,
+        "hispanic": 1487319298681864342,
+        "white":    1487319326204625047,
+        "black":    1487319363265626173,
+    }
+
+    channel_id = CATEGORY_CHANNELS.get(category)
+    if not channel_id:
+        return jsonify({"error": "Invalid category"}), 400
+
+    url = f"{DISCORD_API}/channels/{channel_id}/threads/archived/public?limit=50"
+    res = requests.get(url, headers=discord_headers(DISCORD_BOT_TOKEN))
+
+    posts = []
+    if res.status_code == 200:
+        for thread in res.json().get('threads', []):
+            posts.append({"id": thread['id'], "name": thread['name']})
+
+    url2 = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/threads/active"
+    res2 = requests.get(url2, headers=discord_headers(DISCORD_BOT_TOKEN))
+    if res2.status_code == 200:
+        for thread in res2.json().get('threads', []):
+            if str(thread.get('parent_id')) == str(channel_id):
+                if not any(p['id'] == thread['id'] for p in posts):
+                    posts.append({"id": thread['id'], "name": thread['name']})
+
+    return jsonify({"posts": posts})
+
+@app.route('/get-post-link', methods=['POST'])
+def get_post_link():
+    data      = request.get_json()
+    thread_id = data.get('thread_id')
+    if not thread_id:
+        return jsonify({"error": "thread_id required"}), 400
+
+    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
+
+    for msg in messages:
+        content = msg.get('content', '')
+        if content.startswith(f"{thread_id} |"):
+            parts = content.split(' | ', 1)
+            if len(parts) == 2:
+                link = parts[1].strip()
+                key  = link.split('#')[-1] if '#' in link else ""
+                return jsonify({"success": True, "link": link, "key": key})
+
+    return jsonify({"error": "Link not found"}), 404
 
 # ================== Mega 자동 스캔 ==================
 @app.route('/mega/scan', methods=['POST'])
 def mega_scan():
     from mega import Mega
-    import math
 
     mega_email    = os.getenv('MEGA_EMAIL')
     mega_password = os.getenv('MEGA_PASSWORD')
@@ -311,14 +440,14 @@ def mega_scan():
         return jsonify({"error": "Mega credentials not set"}), 500
 
     data         = request.get_json()
-    folder_names = data.get('folders', [])  # 스캔할 폴더 이름 목록
+    folder_names = data.get('folders', [])
 
     if not folder_names:
         return jsonify({"error": "No folders provided"}), 400
 
     try:
-        m    = Mega()
-        mega = m.login(mega_email, mega_password)
+        m     = Mega()
+        mega  = m.login(mega_email, mega_password)
         files = mega.get_files()
     except Exception as e:
         print(f"[Mega] 로그인 실패: {e}")
@@ -328,34 +457,26 @@ def mega_scan():
 
     for folder_name in folder_names:
         try:
-            # 폴더 찾기
             folder = mega.find(folder_name)
             if not folder:
                 results.append({"name": folder_name, "success": False, "reason": "Folder not found in Mega"})
                 continue
 
             folder_node = list(folder.values())[0] if isinstance(folder, dict) else folder
+            link        = mega.get_link(folder_node)
 
-            # 폴더 링크 생성
-            link = mega.get_link(folder_node)
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
                 continue
 
-            # 링크에서 Key 추출 (#뒤)
             key = link.split('#')[-1] if '#' in link else ""
 
-            # 폴더 용량 계산
             total_bytes = 0
             for f in files.values():
                 if f.get('t') == 0 and f.get('p') == folder_node.get('h'):
                     total_bytes += f.get('s', 0)
 
-            if total_bytes > 0:
-                size_gb = round(total_bytes / (1024 ** 3), 2)
-                file_size = f"{size_gb}GB"
-            else:
-                file_size = "Unknown"
+            file_size = f"{round(total_bytes / (1024 ** 3), 2)}GB" if total_bytes > 0 else "Unknown"
 
             results.append({
                 "name":      folder_name,
@@ -369,3 +490,13 @@ def mega_scan():
             results.append({"name": folder_name, "success": False, "reason": str(e)})
 
     return jsonify({"results": results})
+
+# ================== 헬스체크 ==================
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+# ================== 실행 ==================
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
