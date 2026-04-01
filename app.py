@@ -1,11 +1,13 @@
 import os
-import sqlite3
 import requests
 import random
 import string
 from datetime import datetime
+from functools import wraps
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import stripe
 from dotenv import load_dotenv
 
@@ -13,6 +15,13 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["60 per minute"],
+    storage_uri="memory://"
+)
 
 # ================== 환경변수 ==================
 stripe.api_key            = os.getenv('STRIPE_SECRET_KEY')
@@ -39,33 +48,21 @@ PBANK_TX_CHANNEL_ID       = int(os.getenv('PBANK_TX_CHANNEL_ID', '14880241695378
 SUCCESS_URL_S2            = "https://xhouse.vip/success.html?session_id={CHECKOUT_SESSION_ID}"
 CANCEL_URL_S2             = "https://xhouse.vip"
 
-# Dummy 채널 (링크 저장 + 코드 저장)
+# Dummy 채널 (링크 저장 + 코드 저장 + 결제 기록)
 CODE_STORE_CHANNEL        = 1488022953525248141
 
 DISCORD_API = "https://discord.com/api/v10"
+API_SECRET_KEY = os.getenv('API_SECRET_KEY')
 
-# ================== DB 초기화 ==================
-def init_db():
-    conn = sqlite3.connect('payments.db')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS payments (
-            session_id  TEXT PRIMARY KEY,
-            invite_url  TEXT,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS s2_payments (
-            session_id   TEXT PRIMARY KEY,
-            discord_id   TEXT,
-            role_granted INTEGER DEFAULT 0,
-            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
+# ================== API Key 인증 ==================
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key = request.headers.get('X-API-Key')
+        if not key or key != API_SECRET_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 # ================== Discord 헬퍼 ==================
 def discord_headers(token):
@@ -73,6 +70,12 @@ def discord_headers(token):
         "Authorization": f"Bot {token}",
         "Content-Type": "application/json"
     }
+
+def send_to_channel(token, channel_id, content):
+    """Discord 채널에 메시지 전송"""
+    url = f"{DISCORD_API}/channels/{channel_id}/messages"
+    res = requests.post(url, headers=discord_headers(token), json={"content": content})
+    return res.status_code == 200
 
 def log_transaction(token: str, channel_id: int, message: str):
     """결제 기록을 Discord 채널에 저장 (동기 방식)"""
@@ -117,7 +120,7 @@ def send_dm(token: str, discord_id: str, message: str):
     return res2.status_code == 200
 
 def get_messages_from_channel(token, channel_id, limit=500):
-    """최신 메시지부터 역순으로 조회 (버그 수정 3번)"""
+    """최신 메시지부터 역순으로 조회"""
     url = f"{DISCORD_API}/channels/{channel_id}/messages?limit=100"
     headers = discord_headers(token)
     messages = []
@@ -134,10 +137,50 @@ def get_messages_from_channel(token, channel_id, limit=500):
         last_id = batch[-1]['id']
         if len(batch) < 100:
             break
-    return messages  # Discord는 기본적으로 최신순 반환
+    return messages
+
+# ================== 결제 기록 헬퍼 (Discord 채널 저장) ==================
+def find_s1_payment(session_id):
+    """S1 결제 기록 조회 → (message_id, invite_url) or None"""
+    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
+    for msg in messages:
+        content = msg.get('content', '')
+        if content.startswith(f"S1_PAY | {session_id} |"):
+            parts = content.split(' | ')
+            invite_url = parts[2].strip() if len(parts) >= 3 else "NONE"
+            return (msg['id'], invite_url if invite_url != "NONE" else None)
+    return None
+
+def save_s1_payment(session_id, invite_url=None):
+    """S1 결제 기록 저장"""
+    invite = invite_url or "NONE"
+    content = f"S1_PAY | {session_id} | {invite}"
+    send_to_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL, content)
+
+def update_s1_invite(message_id, session_id, invite_url):
+    """S1 결제 기록에 초대링크 업데이트"""
+    content = f"S1_PAY | {session_id} | {invite_url}"
+    url = f"{DISCORD_API}/channels/{CODE_STORE_CHANNEL}/messages/{message_id}"
+    requests.patch(url, headers=discord_headers(DISCORD_BOT_TOKEN), json={"content": content})
+
+def find_s2_payment(session_id):
+    """S2 결제 기록 조회 → True if exists, False if not"""
+    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
+    for msg in messages:
+        content = msg.get('content', '')
+        if content.startswith(f"S2_PAY | {session_id} |"):
+            return True
+    return False
+
+def save_s2_payment(session_id, discord_id, role_granted=0):
+    """S2 결제 기록 저장"""
+    content = f"S2_PAY | {session_id} | {discord_id} | {role_granted}"
+    send_to_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL, content)
 
 # ================== 서버 1: Checkout Session 생성 ==================
 @app.route('/create-checkout', methods=['POST'])
+@require_api_key
+@limiter.limit("5 per minute")
 def create_checkout():
     data       = request.get_json()
     plan       = data.get('plan')
@@ -175,12 +218,9 @@ def stripe_webhook():
         session_id  = session_obj['id']
         discord_id  = session_obj.get('metadata', {}).get('discord_id')
 
-        conn = sqlite3.connect('payments.db')
-        c    = conn.cursor()
-        c.execute("SELECT session_id FROM payments WHERE session_id = ?", (session_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
-            conn.commit()
+        existing = find_s1_payment(session_id)
+        if not existing:
+            save_s1_payment(session_id)
             print(f"[S1 Webhook] 결제 저장: {session_id}")
 
             if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
@@ -193,12 +233,12 @@ def stripe_webhook():
                     log_transaction(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
                 else:
                     print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
-        conn.close()
 
     return jsonify(success=True), 200
 
 # ================== 서버 1: 초대링크 발급 ==================
 @app.route('/create-invite', methods=['POST'])
+@limiter.limit("3 per minute")
 def create_invite():
     data       = request.get_json()
     session_id = data.get('session_id')
@@ -206,42 +246,38 @@ def create_invite():
     if not session_id:
         return jsonify({"error": "session_id is required."}), 400
 
-    conn = sqlite3.connect('payments.db')
-    c    = conn.cursor()
-    c.execute("SELECT invite_url FROM payments WHERE session_id = ?", (session_id,))
-    row = c.fetchone()
+    existing = find_s1_payment(session_id)
 
-    if not row:
+    if not existing:
         try:
             session = stripe.checkout.Session.retrieve(session_id)
             if session.payment_status != 'paid':
-                conn.close()
                 return jsonify({"error": "Payment not completed."}), 400
-            c.execute("INSERT INTO payments (session_id) VALUES (?)", (session_id,))
-            conn.commit()
-            row = (None,)
-        except stripe.error.StripeError as e:
-            conn.close()
+            save_s1_payment(session_id)
+            existing = (None, None)
+        except Exception as e:
             return jsonify({"error": f"Payment verification failed: {str(e)}"}), 400
 
-    existing_invite = row[0]
-    if existing_invite:
-        conn.close()
-        return jsonify({"success": True, "invite_url": existing_invite})
+    message_id, invite_url = existing if existing and len(existing) == 2 else (None, None)
+
+    if invite_url:
+        return jsonify({"success": True, "invite_url": invite_url})
 
     try:
         invite_url = create_discord_invite()
-        c.execute("UPDATE payments SET invite_url = ? WHERE session_id = ?", (invite_url, session_id))
-        conn.commit()
-        conn.close()
+        if message_id:
+            update_s1_invite(message_id, session_id, invite_url)
+        else:
+            save_s1_payment(session_id, invite_url)
         return jsonify({"success": True, "invite_url": invite_url})
     except Exception as e:
-        conn.close()
         print(f"[S1 Invite] 생성 실패: {e}")
         return jsonify({"error": "Failed to create invite link. Please try again."}), 500
 
 # ================== 서버 2: Checkout Session 생성 ==================
 @app.route('/s2/create-checkout', methods=['POST'])
+@require_api_key
+@limiter.limit("5 per minute")
 def s2_create_checkout():
     data       = request.get_json()
     discord_id = data.get('discord_id')
@@ -284,24 +320,18 @@ def s2_stripe_webhook():
             print(f"[S2 Webhook] discord_id 없음: {session_id}")
             return jsonify(success=True), 200
 
-        conn = sqlite3.connect('payments.db')
-        c    = conn.cursor()
-        c.execute("SELECT session_id FROM s2_payments WHERE session_id = ?", (session_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO s2_payments (session_id, discord_id) VALUES (?, ?)", (session_id, discord_id))
-            conn.commit()
-
+        if not find_s2_payment(session_id):
             success = assign_role(discord_id)
+            role_granted = 1 if success else 0
+            save_s2_payment(session_id, discord_id, role_granted)
+
             if success:
-                c.execute("UPDATE s2_payments SET role_granted = 1 WHERE session_id = ?", (session_id,))
-                conn.commit()
                 send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. 🎉")
                 print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
                 log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                 log_transaction(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
             else:
                 print(f"[S2 Webhook] 역할 부여 실패: {discord_id}")
-        conn.close()
 
     return jsonify(success=True), 200
 
@@ -310,6 +340,7 @@ def generate_code():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
 @app.route('/issue-code', methods=['POST'])
+@require_api_key
 def issue_code():
     data       = request.get_json()
     discord_id = data.get('discord_id')
@@ -340,6 +371,7 @@ def issue_code():
     return jsonify({"success": True, "code": new_code, "existing": False})
 
 @app.route('/verify-code', methods=['POST'])
+@require_api_key
 def verify_code():
     data = request.get_json()
     code = data.get('code', '').strip()
@@ -375,6 +407,7 @@ def verify_code():
 
 # ================== 포스트 조회 (텔레그램 봇용 - 보류) ==================
 @app.route('/get-posts', methods=['POST'])
+@require_api_key
 def get_posts():
     data     = request.get_json()
     category = data.get('category', '').lower()
@@ -409,6 +442,7 @@ def get_posts():
     return jsonify({"posts": posts})
 
 @app.route('/get-post-link', methods=['POST'])
+@require_api_key
 def get_post_link():
     data      = request.get_json()
     thread_id = data.get('thread_id')
@@ -430,6 +464,7 @@ def get_post_link():
 
 # ================== Mega 자동 스캔 ==================
 @app.route('/mega/scan', methods=['POST'])
+@require_api_key
 def mega_scan():
     from mega import Mega
 
