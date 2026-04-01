@@ -10,6 +10,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import stripe
 from dotenv import load_dotenv
+from mega import Mega
 
 load_dotenv()
 
@@ -71,20 +72,13 @@ def discord_headers(token):
         "Content-Type": "application/json"
     }
 
-def send_to_channel(token, channel_id, content):
+def send_to_channel(token: str, channel_id: int, content: str) -> bool:
     """Discord 채널에 메시지 전송"""
     url = f"{DISCORD_API}/channels/{channel_id}/messages"
     res = requests.post(url, headers=discord_headers(token), json={"content": content})
+    if res.status_code != 200:
+        print(f"[Discord] 전송 실패 (채널 {channel_id}): {res.status_code}")
     return res.status_code == 200
-
-def log_transaction(token: str, channel_id: int, message: str):
-    """결제 기록을 Discord 채널에 저장 (동기 방식)"""
-    url = f"{DISCORD_API}/channels/{channel_id}/messages"
-    res = requests.post(url, headers=discord_headers(token), json={"content": message})
-    if res.status_code == 200:
-        print(f"[TX Log] 저장 완료: {message}")
-    else:
-        print(f"[TX Log] 저장 실패: {res.status_code}")
 
 def create_discord_invite():
     url = f"{DISCORD_API}/channels/{INVITE_CHANNEL_ID}/invites"
@@ -226,13 +220,16 @@ def stripe_webhook():
             if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
                 url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
                 res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
+                timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
                 if res.status_code in (200, 204):
-                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. Welcome to X-House! 🎉")
+                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. Welcome to X-House! 🎉")
                     print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
-                    log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
-                    log_transaction(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
+                    log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
+                    send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
                 else:
                     print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
+                    log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED (HTTP {res.status_code}) | {timestamp} UTC"
+                    send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
 
     return jsonify(success=True), 200
 
@@ -324,14 +321,17 @@ def s2_stripe_webhook():
             success = assign_role(discord_id)
             role_granted = 1 if success else 0
             save_s2_payment(session_id, discord_id, role_granted)
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
             if success:
-                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership has been activated. 🎉")
+                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. 🎉")
                 print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
-                log_msg = f"✅ `{session_id}` | <@{discord_id}> | {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
-                log_transaction(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
+                log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
+                send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
             else:
                 print(f"[S2 Webhook] 역할 부여 실패: {discord_id}")
+                log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED | {timestamp} UTC"
+                send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
 
     return jsonify(success=True), 200
 
@@ -466,8 +466,6 @@ def get_post_link():
 @app.route('/mega/scan', methods=['POST'])
 @require_api_key
 def mega_scan():
-    from mega import Mega
-
     mega_email    = os.getenv('MEGA_EMAIL')
     mega_password = os.getenv('MEGA_PASSWORD')
 
