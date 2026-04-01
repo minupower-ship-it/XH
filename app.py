@@ -222,7 +222,7 @@ def stripe_webhook():
                 res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
                 timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
                 if res.status_code in (200, 204):
-                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. Welcome to X-House! 🎉")
+                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. Welcome to X-House! 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
                     print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
                     log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
                     send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
@@ -324,7 +324,7 @@ def s2_stripe_webhook():
             timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
             if success:
-                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. 🎉")
+                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
                 print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
                 log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
                 send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
