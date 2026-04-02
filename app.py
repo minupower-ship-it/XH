@@ -489,10 +489,12 @@ def mega_scan():
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
 
-    # get_files() 결과에서 이름 → (node_id, node) 튜플 매핑 (mega.find() 반환 형식과 동일)
+    # ph(public handle) 있는 폴더만 이름 → (ph, node) 매핑
+    from mega.crypto import a32_to_base64, decrypt_key, base64_to_a32
+
     folder_map = {}
     for node_id, node in files.items():
-        if isinstance(node.get('a'), dict):
+        if isinstance(node.get('a'), dict) and node.get('ph'):
             name = node['a'].get('n')
             if name:
                 folder_map[name] = (node_id, node)
@@ -503,16 +505,16 @@ def mega_scan():
         try:
             folder_entry = folder_map.get(folder_name)
             if not folder_entry:
-                results.append({"name": folder_name, "success": False, "reason": f"Not found (map_size={len(folder_map)})"})
+                results.append({"name": folder_name, "success": False, "reason": f"Not found (linked_map={len(folder_map)})"})
                 continue
 
             node_id, folder_node = folder_entry
-            # public handle이 없으면 API로 생성 (get_files() 재호출 없이)
-            if not folder_node.get('ph'):
-                ph = mega._api_request({'a': 'l', 'n': folder_node['h']})
-                if isinstance(ph, str):
-                    folder_node['ph'] = ph
-            link = mega.get_link(folder_entry)
+            ph = folder_node['ph']
+            file_key = folder_node.get('k', '')
+            key_part = file_key.split(':')[-1] if ':' in str(file_key) else str(file_key)
+            decrypted = decrypt_key(base64_to_a32(key_part), mega.master_key)
+            enc = a32_to_base64(decrypted)
+            link = f'https://mega.nz/folder/{ph}#{enc}'
 
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
@@ -559,18 +561,22 @@ def mega_debug():
     search = request.args.get('search', '').lower()
 
     all_names = []
+    linked_names = []  # ph 있는 것만
     for node_id, node in files.items():
         a = node.get('a')
         if isinstance(a, dict):
             name = a.get('n')
             if name:
-                all_names.append({"t": node.get('t'), "name": name})
+                all_names.append({"t": node.get('t'), "name": name, "has_ph": bool(node.get('ph'))})
+                if node.get('ph'):
+                    linked_names.append(name)
 
     if search:
         matched = [n for n in all_names if search in n["name"].lower()]
         return jsonify({
             "total_nodes": total_nodes,
             "total_named": len(all_names),
+            "linked_count": len(linked_names),
             "search": search,
             "matched_count": len(matched),
             "matches": matched[:50]
@@ -579,7 +585,9 @@ def mega_debug():
     return jsonify({
         "total_nodes": total_nodes,
         "total_named": len(all_names),
-        "sample": all_names[:30]
+        "linked_count": len(linked_names),
+        "linked_sample": linked_names[:20],
+        "sample": all_names[:20]
     })
 
 # ================== 헬스체크 ==================
