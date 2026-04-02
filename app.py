@@ -501,7 +501,7 @@ def mega_scan():
         try:
             folder_node = folder_map.get(folder_name)
             if not folder_node:
-                results.append({"name": folder_name, "success": False, "reason": "Folder not found in Mega"})
+                results.append({"name": folder_name, "success": False, "reason": f"Not found (map_size={len(folder_map)})"})
                 continue
 
             link = mega.get_link(folder_node)
@@ -531,7 +531,7 @@ def mega_scan():
         except Exception as e:
             results.append({"name": folder_name, "success": False, "reason": str(e)})
 
-    return jsonify({"results": results})
+    return jsonify({"results": results, "debug_map_size": len(folder_map)})
 
 # ================== Mega 디버그 (임시) ==================
 @app.route('/mega/debug', methods=['GET'])
