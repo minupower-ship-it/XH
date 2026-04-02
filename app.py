@@ -485,25 +485,25 @@ def mega_scan():
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
 
-    # get_files() 결과에서 이름 → node 매핑 직접 생성 (mega.find() 대체)
-    # 파일(t=0)과 폴더(t=1) 모두 포함
+    # get_files() 결과에서 이름 → (node_id, node) 튜플 매핑 (mega.find() 반환 형식과 동일)
     folder_map = {}
     for node_id, node in files.items():
         if isinstance(node.get('a'), dict):
             name = node['a'].get('n')
             if name:
-                folder_map[name] = node
+                folder_map[name] = (node_id, node)
 
     results = []
 
     for folder_name in folder_names:
         try:
-            folder_node = folder_map.get(folder_name)
-            if not folder_node:
+            folder_entry = folder_map.get(folder_name)
+            if not folder_entry:
                 results.append({"name": folder_name, "success": False, "reason": f"Not found (map_size={len(folder_map)})"})
                 continue
 
-            link = mega.get_link(folder_node)
+            node_id, folder_node = folder_entry
+            link = mega.get_link(folder_entry)  # tuple 전달 (mega.find() 반환 형식)
 
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
