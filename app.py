@@ -507,7 +507,12 @@ def mega_scan():
                 continue
 
             node_id, folder_node = folder_entry
-            link = mega.export(folder_entry)  # 공개 링크 없으면 자동 생성
+            # public handle이 없으면 API로 생성 (get_files() 재호출 없이)
+            if not folder_node.get('ph'):
+                ph = mega._api_request({'a': 'l', 'n': folder_node['h']})
+                if isinstance(ph, str):
+                    folder_node['ph'] = ph
+            link = mega.get_link(folder_entry)
 
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
