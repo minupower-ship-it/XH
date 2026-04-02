@@ -548,28 +548,30 @@ def mega_debug():
         return jsonify({"error": f"Login failed: {str(e)}"}), 500
 
     total_nodes = len(files)
+    search = request.args.get('search', '').lower()
 
-    # a 필드 타입 분석
-    a_types = {"dict": 0, "str": 0, "none": 0, "other": 0}
-    sample_nodes = []
-    for node_id, node in list(files.items())[:200]:
+    all_names = []
+    for node_id, node in files.items():
         a = node.get('a')
         if isinstance(a, dict):
-            a_types["dict"] += 1
             name = a.get('n')
-            if name and len(sample_nodes) < 20:
-                sample_nodes.append({"t": node.get('t'), "name": name})
-        elif isinstance(a, str):
-            a_types["str"] += 1
-        elif a is None:
-            a_types["none"] += 1
-        else:
-            a_types["other"] += 1
+            if name:
+                all_names.append({"t": node.get('t'), "name": name})
+
+    if search:
+        matched = [n for n in all_names if search in n["name"].lower()]
+        return jsonify({
+            "total_nodes": total_nodes,
+            "total_named": len(all_names),
+            "search": search,
+            "matched_count": len(matched),
+            "matches": matched[:50]
+        })
 
     return jsonify({
         "total_nodes": total_nodes,
-        "a_type_distribution": a_types,
-        "sample_names": sample_nodes
+        "total_named": len(all_names),
+        "sample": all_names[:30]
     })
 
 # ================== 헬스체크 ==================
