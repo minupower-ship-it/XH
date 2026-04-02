@@ -489,7 +489,7 @@ def mega_scan():
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
 
-    # ph(public handle) 있는 폴더만 이름 → (ph, node) 매핑
+    # ph(public handle) 있는 폴더만 이름 → (ph, node) 매핑 (소문자 키로 저장)
     from mega.crypto import a32_to_base64, decrypt_key, base64_to_a32
 
     folder_map = {}
@@ -497,13 +497,13 @@ def mega_scan():
         if isinstance(node.get('a'), dict) and node.get('ph'):
             name = node['a'].get('n')
             if name:
-                folder_map[name] = (node_id, node)
+                folder_map[name.lower()] = (node_id, node)
 
     results = []
 
     for folder_name in folder_names:
         try:
-            folder_entry = folder_map.get(folder_name)
+            folder_entry = folder_map.get(folder_name.lower())
             if not folder_entry:
                 results.append({"name": folder_name, "success": False, "reason": f"Not found (linked_map={len(folder_map)})"})
                 continue
