@@ -524,6 +524,36 @@ def mega_scan():
 
     return jsonify({"results": results})
 
+# ================== Mega 디버그 (임시) ==================
+@app.route('/mega/debug', methods=['GET'])
+@require_api_key
+def mega_debug():
+    mega_email    = os.getenv('MEGA_EMAIL')
+    mega_password = os.getenv('MEGA_PASSWORD')
+    if not mega_email or not mega_password:
+        return jsonify({"error": "Mega credentials not set"}), 500
+    try:
+        m    = Mega()
+        mega = m.login(mega_email, mega_password)
+        files = mega.get_files()
+    except Exception as e:
+        return jsonify({"error": f"Login failed: {str(e)}"}), 500
+
+    folders = []
+    total_nodes = len(files)
+    for node_id, node in files.items():
+        if node.get('t') == 1:  # t=1 이 폴더
+            name = None
+            if isinstance(node.get('a'), dict):
+                name = node['a'].get('n')
+            folders.append({"id": node_id, "name": name})
+
+    return jsonify({
+        "total_nodes": total_nodes,
+        "folder_count": len(folders),
+        "folders": folders[:100]  # 최대 100개만
+    })
+
 # ================== 헬스체크 ==================
 @app.route('/health', methods=['GET'])
 def health():
