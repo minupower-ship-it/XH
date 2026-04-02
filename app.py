@@ -507,7 +507,7 @@ def mega_scan():
                 continue
 
             node_id, folder_node = folder_entry
-            link = mega.get_link(folder_entry)  # tuple 전달 (mega.find() 반환 형식)
+            link = mega.export(folder_entry)  # 공개 링크 없으면 자동 생성
 
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
