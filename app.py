@@ -547,20 +547,29 @@ def mega_debug():
     except Exception as e:
         return jsonify({"error": f"Login failed: {str(e)}"}), 500
 
-    all_nodes = []
     total_nodes = len(files)
-    for node_id, node in files.items():
-        t = node.get('t')  # 0=파일, 1=폴더
-        name = None
-        if isinstance(node.get('a'), dict):
-            name = node['a'].get('n')
-        all_nodes.append({"id": node_id, "type": t, "name": name})
 
-    named = [n for n in all_nodes if n["name"]]
+    # a 필드 타입 분석
+    a_types = {"dict": 0, "str": 0, "none": 0, "other": 0}
+    sample_nodes = []
+    for node_id, node in list(files.items())[:200]:
+        a = node.get('a')
+        if isinstance(a, dict):
+            a_types["dict"] += 1
+            name = a.get('n')
+            if name and len(sample_nodes) < 20:
+                sample_nodes.append({"t": node.get('t'), "name": name})
+        elif isinstance(a, str):
+            a_types["str"] += 1
+        elif a is None:
+            a_types["none"] += 1
+        else:
+            a_types["other"] += 1
+
     return jsonify({
         "total_nodes": total_nodes,
-        "named_count": len(named),
-        "sample": named[:50]  # 이름 있는 노드 50개 샘플
+        "a_type_distribution": a_types,
+        "sample_names": sample_nodes
     })
 
 # ================== 헬스체크 ==================
