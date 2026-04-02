@@ -526,7 +526,6 @@ def mega_scan():
 
 # ================== Mega 디버그 (임시) ==================
 @app.route('/mega/debug', methods=['GET'])
-@require_api_key
 def mega_debug():
     mega_email    = os.getenv('MEGA_EMAIL')
     mega_password = os.getenv('MEGA_PASSWORD')
