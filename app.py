@@ -486,17 +486,24 @@ def mega_scan():
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
 
+    # get_files() 결과에서 폴더명 → node 매핑 직접 생성 (mega.find() 대체)
+    folder_map = {}
+    for node_id, node in files.items():
+        if node.get('t') == 1 and isinstance(node.get('a'), dict):
+            name = node['a'].get('n')
+            if name:
+                folder_map[name] = node
+
     results = []
 
     for folder_name in folder_names:
         try:
-            folder = mega.find(folder_name)
-            if not folder:
+            folder_node = folder_map.get(folder_name)
+            if not folder_node:
                 results.append({"name": folder_name, "success": False, "reason": "Folder not found in Mega"})
                 continue
 
-            folder_node = list(folder.values())[0] if isinstance(folder, dict) else folder
-            link        = mega.get_link(folder_node)
+            link = mega.get_link(folder_node)
 
             if not link:
                 results.append({"name": folder_name, "success": False, "reason": "Failed to get folder link"})
@@ -505,8 +512,9 @@ def mega_scan():
             key = link.split('#')[-1] if '#' in link else ""
 
             total_bytes = 0
+            folder_h = folder_node.get('h')
             for f in files.values():
-                if f.get('t') == 0 and f.get('p') == folder_node.get('h'):
+                if f.get('t') == 0 and f.get('p') == folder_h:
                     total_bytes += f.get('s', 0)
 
             file_size = f"{round(total_bytes / (1024 ** 3), 2)}GB" if total_bytes > 0 else "Unknown"
