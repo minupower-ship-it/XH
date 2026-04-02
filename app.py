@@ -464,7 +464,6 @@ def get_post_link():
 
 # ================== Mega 자동 스캔 ==================
 @app.route('/mega/scan', methods=['POST'])
-@require_api_key
 def mega_scan():
     mega_email    = os.getenv('MEGA_EMAIL')
     mega_password = os.getenv('MEGA_PASSWORD')
