@@ -486,10 +486,11 @@ def mega_scan():
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
 
-    # get_files() 결과에서 폴더명 → node 매핑 직접 생성 (mega.find() 대체)
+    # get_files() 결과에서 이름 → node 매핑 직접 생성 (mega.find() 대체)
+    # 파일(t=0)과 폴더(t=1) 모두 포함
     folder_map = {}
     for node_id, node in files.items():
-        if node.get('t') == 1 and isinstance(node.get('a'), dict):
+        if isinstance(node.get('a'), dict):
             name = node['a'].get('n')
             if name:
                 folder_map[name] = node
@@ -546,19 +547,20 @@ def mega_debug():
     except Exception as e:
         return jsonify({"error": f"Login failed: {str(e)}"}), 500
 
-    folders = []
+    all_nodes = []
     total_nodes = len(files)
     for node_id, node in files.items():
-        if node.get('t') == 1:  # t=1 이 폴더
-            name = None
-            if isinstance(node.get('a'), dict):
-                name = node['a'].get('n')
-            folders.append({"id": node_id, "name": name})
+        t = node.get('t')  # 0=파일, 1=폴더
+        name = None
+        if isinstance(node.get('a'), dict):
+            name = node['a'].get('n')
+        all_nodes.append({"id": node_id, "type": t, "name": name})
 
+    named = [n for n in all_nodes if n["name"]]
     return jsonify({
         "total_nodes": total_nodes,
-        "folder_count": len(folders),
-        "folders": folders[:100]  # 최대 100개만
+        "named_count": len(named),
+        "sample": named[:50]  # 이름 있는 노드 50개 샘플
     })
 
 # ================== 헬스체크 ==================
