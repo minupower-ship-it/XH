@@ -478,9 +478,13 @@ def mega_scan():
         return jsonify({"error": "No folders provided"}), 400
 
     try:
+        import os as _os
+        _orig_dir = _os.getcwd()
+        _os.chdir('/tmp')
         m     = Mega()
         mega  = m.login(mega_email, mega_password)
         files = mega.get_files()
+        _os.chdir(_orig_dir)
     except Exception as e:
         print(f"[Mega] 로그인 실패: {e}")
         return jsonify({"error": f"Mega login failed: {str(e)}"}), 500
