@@ -212,24 +212,19 @@ def stripe_webhook():
         session_id  = session_obj['id']
         discord_id  = session_obj.get('metadata', {}).get('discord_id')
 
-        existing = find_s1_payment(session_id)
-        if not existing:
-            save_s1_payment(session_id)
-            print(f"[S1 Webhook] 결제 저장: {session_id}")
-
-            if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
-                url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
-                res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
-                timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-                if res.status_code in (200, 204):
-                    send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. Welcome to X-House! 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
-                    print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
-                    log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
-                    send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
-                else:
-                    print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
-                    log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED (HTTP {res.status_code}) | {timestamp} UTC"
-                    send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
+        if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
+            url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
+            res = requests.put(url, headers=discord_headers(DISCORD_BOT_TOKEN))
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+            if res.status_code in (200, 204):
+                send_dm(DISCORD_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. Welcome to X-House! 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
+                print(f"[S1 Webhook] 역할 부여 완료: {discord_id}")
+                log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
+                send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
+            else:
+                print(f"[S1 Webhook] 역할 부여 실패: {res.status_code}")
+                log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED (HTTP {res.status_code}) | {timestamp} UTC"
+                send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
 
     return jsonify(success=True), 200
 
