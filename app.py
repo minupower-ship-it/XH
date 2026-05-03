@@ -238,29 +238,15 @@ def create_invite():
     if not session_id:
         return jsonify({"error": "session_id is required."}), 400
 
-    existing = find_s1_payment(session_id)
-
-    if not existing:
-        try:
-            session = stripe.checkout.Session.retrieve(session_id)
-            if session.payment_status != 'paid':
-                return jsonify({"error": "Payment not completed."}), 400
-            save_s1_payment(session_id)
-            existing = (None, None)
-        except Exception as e:
-            return jsonify({"error": f"Payment verification failed: {str(e)}"}), 400
-
-    message_id, invite_url = existing if existing and len(existing) == 2 else (None, None)
-
-    if invite_url:
-        return jsonify({"success": True, "invite_url": invite_url})
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        if session.payment_status != 'paid':
+            return jsonify({"error": "Payment not completed."}), 400
+    except Exception as e:
+        return jsonify({"error": f"Payment verification failed: {str(e)}"}), 400
 
     try:
         invite_url = create_discord_invite()
-        if message_id:
-            update_s1_invite(message_id, session_id, invite_url)
-        else:
-            save_s1_payment(session_id, invite_url)
         return jsonify({"success": True, "invite_url": invite_url})
     except Exception as e:
         print(f"[S1 Invite] 생성 실패: {e}")
@@ -312,21 +298,18 @@ def s2_stripe_webhook():
             print(f"[S2 Webhook] discord_id 없음: {session_id}")
             return jsonify(success=True), 200
 
-        if not find_s2_payment(session_id):
-            success = assign_role(discord_id)
-            role_granted = 1 if success else 0
-            save_s2_payment(session_id, discord_id, role_granted)
-            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+        success = assign_role(discord_id)
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
-            if success:
-                send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
-                print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
-                log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
-                send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
-            else:
-                print(f"[S2 Webhook] 역할 부여 실패: {discord_id}")
-                log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED | {timestamp} UTC"
-                send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
+        if success:
+            send_dm(S2_BOT_TOKEN, discord_id, "✅ Payment confirmed! Your membership role has been granted. 🎉\n\n⭐ Enjoying your access? Drop a quick review in the server — it means a lot to us!")
+            print(f"[S2 Webhook] 역할 부여 완료: {discord_id}")
+            log_msg = f"✅ `{session_id}` | <@{discord_id}> | Role: ✅ Granted | {timestamp} UTC"
+            send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
+        else:
+            print(f"[S2 Webhook] 역할 부여 실패: {discord_id}")
+            log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED | {timestamp} UTC"
+            send_to_channel(S2_BOT_TOKEN, PBANK_TX_CHANNEL_ID, log_msg)
 
     return jsonify(success=True), 200
 
