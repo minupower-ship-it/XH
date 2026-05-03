@@ -133,43 +133,6 @@ def get_messages_from_channel(token, channel_id, limit=500):
             break
     return messages
 
-# ================== 결제 기록 헬퍼 (Discord 채널 저장) ==================
-def find_s1_payment(session_id):
-    """S1 결제 기록 조회 → (message_id, invite_url) or None"""
-    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
-    for msg in messages:
-        content = msg.get('content', '')
-        if content.startswith(f"S1_PAY | {session_id} |"):
-            parts = content.split(' | ')
-            invite_url = parts[2].strip() if len(parts) >= 3 else "NONE"
-            return (msg['id'], invite_url if invite_url != "NONE" else None)
-    return None
-
-def save_s1_payment(session_id, invite_url=None):
-    """S1 결제 기록 저장"""
-    invite = invite_url or "NONE"
-    content = f"S1_PAY | {session_id} | {invite}"
-    send_to_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL, content)
-
-def update_s1_invite(message_id, session_id, invite_url):
-    """S1 결제 기록에 초대링크 업데이트"""
-    content = f"S1_PAY | {session_id} | {invite_url}"
-    url = f"{DISCORD_API}/channels/{CODE_STORE_CHANNEL}/messages/{message_id}"
-    requests.patch(url, headers=discord_headers(DISCORD_BOT_TOKEN), json={"content": content})
-
-def find_s2_payment(session_id):
-    """S2 결제 기록 조회 → True if exists, False if not"""
-    messages = get_messages_from_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL)
-    for msg in messages:
-        content = msg.get('content', '')
-        if content.startswith(f"S2_PAY | {session_id} |"):
-            return True
-    return False
-
-def save_s2_payment(session_id, discord_id, role_granted=0):
-    """S2 결제 기록 저장"""
-    content = f"S2_PAY | {session_id} | {discord_id} | {role_granted}"
-    send_to_channel(DISCORD_BOT_TOKEN, CODE_STORE_CHANNEL, content)
 
 # ================== 서버 1: Checkout Session 생성 ==================
 @app.route('/create-checkout', methods=['POST'])
