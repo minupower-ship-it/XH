@@ -92,6 +92,7 @@ def _init_db():
             plan        TEXT,
             converted_at TIMESTAMP DEFAULT NOW()
         )''')
+        cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_rc_session ON referral_conversions(session_id)')
         conn.commit()
         cur.close()
         print("[DB] Initialized")
@@ -257,7 +258,7 @@ def stripe_webhook():
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    'INSERT INTO referral_conversions (session_id, ref, plan) VALUES (%s, %s, %s)',
+                    'INSERT INTO referral_conversions (session_id, ref, plan) VALUES (%s, %s, %s) ON CONFLICT (session_id) DO NOTHING',
                     (session_id, ref, plan)
                 )
                 conn.commit()
