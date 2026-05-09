@@ -72,6 +72,7 @@ def _init_db():
     if not DATABASE_URL:
         print("[DB] DATABASE_URL not set, skipping")
         return
+    conn = None
     try:
         _db_pool = pg_pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
         conn = _get_db()
@@ -93,10 +94,12 @@ def _init_db():
         )''')
         conn.commit()
         cur.close()
-        _release_db(conn)
         print("[DB] Initialized")
     except Exception as e:
         print(f"[DB] Init error: {e}")
+    finally:
+        if conn:
+            _release_db(conn)
 
 _init_db()
 
@@ -248,7 +251,7 @@ def stripe_webhook():
         plan        = meta.get('plan', 'lifetime')
         source      = meta.get('source', 'discord')
 
-        # 웹 결제 → referral_conversions 기록
+        # 웹 결제 → referral_conversions 기록 + 로그
         if source == 'web' and _db_pool:
             conn = _get_db()
             try:
@@ -264,6 +267,9 @@ def stripe_webhook():
                 print(f"[Webhook] DB error: {e}")
             finally:
                 _release_db(conn)
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+            log_msg = f"🌐 Web payment | `{session_id}` | ref: `{ref or 'direct'}` | plan: `{plan}` | {timestamp} UTC"
+            send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
 
         if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
             url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
