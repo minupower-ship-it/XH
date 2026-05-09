@@ -11,6 +11,8 @@ from flask_limiter.util import get_remote_address
 import stripe
 from dotenv import load_dotenv
 from mega import Mega
+import psycopg2
+from psycopg2 import pool as pg_pool
 
 load_dotenv()
 
@@ -54,6 +56,49 @@ CODE_STORE_CHANNEL        = 1488022953525248141
 
 DISCORD_API = "https://discord.com/api/v10"
 API_SECRET_KEY = os.getenv('API_SECRET_KEY')
+DATABASE_URL   = os.getenv('DATABASE_URL')
+
+# ================== DB 연결 ==================
+_db_pool = None
+
+def _get_db():
+    return _db_pool.getconn()
+
+def _release_db(conn):
+    _db_pool.putconn(conn)
+
+def _init_db():
+    global _db_pool
+    if not DATABASE_URL:
+        print("[DB] DATABASE_URL not set, skipping")
+        return
+    try:
+        _db_pool = pg_pool.ThreadedConnectionPool(1, 5, DATABASE_URL)
+        conn = _get_db()
+        cur = conn.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS paid_invites (
+            invite_code TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            ref         TEXT,
+            used        BOOLEAN DEFAULT FALSE,
+            created_at  TIMESTAMP DEFAULT NOW()
+        )''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS referral_conversions (
+            id          SERIAL PRIMARY KEY,
+            session_id  TEXT,
+            ref         TEXT,
+            discord_id  BIGINT,
+            plan        TEXT,
+            converted_at TIMESTAMP DEFAULT NOW()
+        )''')
+        conn.commit()
+        cur.close()
+        _release_db(conn)
+        print("[DB] Initialized")
+    except Exception as e:
+        print(f"[DB] Init error: {e}")
+
+_init_db()
 
 # ================== API Key 인증 ==================
 def require_api_key(f):
@@ -158,6 +203,30 @@ def create_checkout():
         print(f"[S1 Checkout] 생성 실패: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ================== 서버 1: 웹사이트 직접 결제 ==================
+@app.route('/create-checkout-web', methods=['POST'])
+@limiter.limit("5 per minute")
+def create_checkout_web():
+    data     = request.get_json()
+    plan     = data.get('plan', 'lifetime')
+    ref      = data.get('ref', '')
+    price_id = VIP_PRICE_ID if plan == 'vip' else LIFETIME_PRICE_ID
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{'price': price_id, 'quantity': 1}],
+            mode='payment',
+            success_url=SUCCESS_URL_S1,
+            cancel_url=CANCEL_URL_S1,
+            metadata={"ref": ref, "plan": plan, "source": "web"}
+        )
+        return jsonify({"url": session.url})
+    except Exception as e:
+        print(f"[Web Checkout] 생성 실패: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ================== 서버 1: Webhook ==================
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
@@ -173,7 +242,28 @@ def stripe_webhook():
     if event['type'] == 'checkout.session.completed':
         session_obj = event['data']['object']
         session_id  = session_obj['id']
-        discord_id  = session_obj.get('metadata', {}).get('discord_id')
+        meta        = session_obj.get('metadata', {})
+        discord_id  = meta.get('discord_id')
+        ref         = meta.get('ref', '')
+        plan        = meta.get('plan', 'lifetime')
+        source      = meta.get('source', 'discord')
+
+        # 웹 결제 → referral_conversions 기록
+        if source == 'web' and _db_pool:
+            conn = _get_db()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    'INSERT INTO referral_conversions (session_id, ref, plan) VALUES (%s, %s, %s)',
+                    (session_id, ref, plan)
+                )
+                conn.commit()
+                cur.close()
+            except Exception as e:
+                conn.rollback()
+                print(f"[Webhook] DB error: {e}")
+            finally:
+                _release_db(conn)
 
         if discord_id and XHOUSE_ROLE_ID and XHOUSE_GUILD_ID:
             url = f"{DISCORD_API}/guilds/{XHOUSE_GUILD_ID}/members/{discord_id}/roles/{XHOUSE_ROLE_ID}"
@@ -209,7 +299,26 @@ def create_invite():
         return jsonify({"error": f"Payment verification failed: {str(e)}"}), 400
 
     try:
-        invite_url = create_discord_invite()
+        invite_url  = create_discord_invite()
+        invite_code = invite_url.split('/')[-1]
+        ref         = session.metadata.get('ref', '') if session.metadata else ''
+
+        if _db_pool:
+            conn = _get_db()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    'INSERT INTO paid_invites (invite_code, session_id, ref) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING',
+                    (invite_code, session_id, ref)
+                )
+                conn.commit()
+                cur.close()
+            except Exception as e:
+                conn.rollback()
+                print(f"[create-invite] DB error: {e}")
+            finally:
+                _release_db(conn)
+
         return jsonify({"success": True, "invite_url": invite_url})
     except Exception as e:
         print(f"[S1 Invite] 생성 실패: {e}")
@@ -530,6 +639,34 @@ def mega_debug():
         "linked_sample": linked_names[:20],
         "sample": all_names[:20]
     })
+
+# ================== Promoter 통계 ==================
+@app.route('/promo-stats', methods=['GET'])
+@require_api_key
+def promo_stats():
+    if not _db_pool:
+        return jsonify({"error": "DB not available"}), 500
+    ref  = request.args.get('ref')
+    conn = _get_db()
+    try:
+        cur = conn.cursor()
+        if ref:
+            cur.execute(
+                'SELECT ref, COUNT(*) FROM referral_conversions WHERE ref=%s GROUP BY ref',
+                (ref,)
+            )
+        else:
+            cur.execute(
+                'SELECT ref, COUNT(*) FROM referral_conversions GROUP BY ref ORDER BY COUNT(*) DESC'
+            )
+        rows = cur.fetchall()
+        cur.close()
+        return jsonify({"stats": [{"ref": r[0] or "direct", "conversions": r[1]} for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        _release_db(conn)
+
 
 # ================== 헬스체크 ==================
 @app.route('/health', methods=['GET'])
