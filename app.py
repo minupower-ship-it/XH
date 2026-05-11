@@ -286,6 +286,28 @@ def stripe_webhook():
                 log_msg = f"⚠️ `{session_id}` | <@{discord_id}> | Role: ❌ FAILED (HTTP {res.status_code}) | {timestamp} UTC"
                 send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_msg)
 
+            # 프로모터 통해 입장한 유저인지 확인
+            if _db_pool:
+                conn = _get_db()
+                try:
+                    cur = conn.cursor()
+                    cur.execute('SELECT promoter FROM member_sources WHERE discord_id=%s', (int(discord_id),))
+                    src = cur.fetchone()
+                    if src:
+                        cur.execute(
+                            'INSERT INTO referral_conversions (session_id, ref, discord_id, plan) VALUES (%s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING',
+                            (session_id, src[0], int(discord_id), plan)
+                        )
+                        conn.commit()
+                        log_ref = f"💰 Discord payment | <@{discord_id}> | ref: `{src[0]}` | {timestamp} UTC"
+                        send_to_channel(DISCORD_BOT_TOKEN, XHOUSE_TX_CHANNEL_ID, log_ref)
+                    cur.close()
+                except Exception as e:
+                    conn.rollback()
+                    print(f"[Webhook] member_sources 조회 오류: {e}")
+                finally:
+                    _release_db(conn)
+
     return jsonify(success=True), 200
 
 # ================== 서버 1: 초대링크 발급 ==================
@@ -646,6 +668,28 @@ def mega_debug():
         "linked_sample": linked_names[:20],
         "sample": all_names[:20]
     })
+
+# ================== Promoter 초대 리다이렉트 ==================
+@app.route('/promo-join', methods=['GET'])
+def promo_join():
+    from flask import redirect as flask_redirect
+    ref = request.args.get('ref', 'discount')
+    fallback = 'https://discord.gg/qWpdeefsXa'
+    if not _db_pool:
+        return flask_redirect(fallback)
+    conn = _get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT invite_url FROM promoter_invites WHERE promoter=%s', (ref,))
+        row = cur.fetchone()
+        cur.close()
+        return flask_redirect(row[0] if row else fallback)
+    except Exception as e:
+        print(f"[promo-join] error: {e}")
+        return flask_redirect(fallback)
+    finally:
+        _release_db(conn)
+
 
 # ================== Promoter 통계 ==================
 @app.route('/promo-stats', methods=['GET'])
