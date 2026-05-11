@@ -200,7 +200,7 @@ def create_checkout():
             mode='payment',
             success_url=SUCCESS_URL_S1,
             cancel_url=CANCEL_URL_S1,
-            metadata={"discord_id": discord_id} if discord_id else {}
+            metadata={"discord_id": discord_id, "plan": plan} if discord_id else {"plan": plan}
         )
         return jsonify({"url": session.url})
     except Exception as e:
